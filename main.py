@@ -2,11 +2,10 @@ import flet as ft
 import os
 import json
 import sqlite3
-import traceback # To catch the exact error
+import traceback
 
-# --- 1. SETUP PATHS (Do not run logic here, just define paths) ---
+# --- 1. SAFE PATHS ---
 try:
-    # Android storage path
     INTERNAL_DIR = os.environ.get("FLET_APP_STORAGE_DATA", os.getcwd())
 except:
     INTERNAL_DIR = ""
@@ -14,141 +13,214 @@ except:
 DB_PATH = os.path.join(INTERNAL_DIR, 'market_data.db')
 USER_PF = os.path.join(INTERNAL_DIR, 'user_portfolio.json')
 
-# --- 2. GLOBAL STATE ---
-# We keep these empty to start. We load them only when needed.
+# --- 2. GLOBAL STATE (LAZY LOAD) ---
 pd = None
 ta = None
 yf = None
 
 def lazy_load():
-    """Imports heavy libraries only when buttons are clicked"""
     global pd, ta, yf
     if pd is None:
         import pandas as pd
         import pandas_ta as ta
         import yfinance as yf
-        # Disable cache to avoid Android permission errors
         yf.set_tz_cache_location(os.path.join(INTERNAL_DIR, "yf_cache"))
 
-# --- 3. DATA FUNCTIONS ---
-def get_default_portfolio():
-    return {"cash": 1000000, "equity": 1000000, "holdings": {}, "history": []}
+# --- 3. DATA ENGINE ---
+def load_pf():
+    if not os.path.exists(USER_PF):
+        return {"cash": 1000000.0, "equity": 1000000.0, "holdings": {}}
+    with open(USER_PF, 'r') as f: return json.load(f)
 
-def load_portfolio_safe():
+def save_pf(data):
+    with open(USER_PF, 'w') as f: json.dump(data, f, indent=4)
+
+TICKERS = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
+           "ITC.NS", "SBIN.NS", "TATAMOTORS.NS", "TRENT.NS", "ZOMATO.NS", 
+           "BEL.NS", "HAL.NS", "VBL.NS", "TITAN.NS"]
+
+def fetch_data(status_txt, page):
+    lazy_load()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('CREATE TABLE IF NOT EXISTS daily_prices (ticker TEXT PRIMARY KEY, close REAL, roc REAL, rsi REAL)')
+    
+    total = len(TICKERS)
+    for i, t in enumerate(TICKERS):
+        try:
+            status_txt.value = f"Fetching {i+1}/{total}: {t}"
+            page.update()
+            
+            df = yf.download(t, period="3mo", progress=False)
+            if not df.empty:
+                # Safe float conversion for SQLite
+                close = float(df['Close'].iloc[-1])
+                roc = float(ta.roc(df['Close'], length=20).iloc[-1])
+                rsi = float(ta.rsi(df['Close'], length=14).iloc[-1])
+                conn.execute('INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?)', (t, close, roc, rsi))
+        except: continue
+    
+    conn.commit()
+    conn.close()
+    status_txt.value = "Market Data Synced Successfully."
+    page.update()
+
+def get_scan():
+    lazy_load()
+    conn = sqlite3.connect(DB_PATH)
+    results = []
     try:
-        if not os.path.exists(USER_PF):
-            return get_default_portfolio()
-        with open(USER_PF, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        return get_default_portfolio() # Fail safe
+        cursor = conn.execute("SELECT ticker, close, roc, rsi FROM daily_prices")
+        for row in cursor:
+            # STRATEGY: Momentum > 0 AND Not Overbought (RSI < 70)
+            if row[2] > 0 and row[3] < 70:
+                results.append({"ticker": row[0], "price": row[1], "roc": row[2]})
+    except: pass
+    conn.close()
+    return sorted(results, key=lambda x: x['roc'], reverse=True)
 
-def save_portfolio_safe(data):
-    try:
-        with open(USER_PF, 'w') as f:
-            json.dump(data, f, indent=4)
-    except:
-        pass # Ignore save errors for now to keep app alive
-
-# --- 4. THE UI ---
+# --- 4. UI BUILDER ---
 def main(page: ft.Page):
-    # CRITICAL: Set these first to ensure the window appears
-    page.title = "Titan Debugger"
-    page.scroll = "auto"
+    page.title = "Titan Pro"
     page.theme_mode = "dark"
+    page.padding = 10
     
-    # Text Log to show us what is happening
-    log_view = ft.Column()
-    
-    def log(msg, color="white"):
-        log_view.controls.append(ft.Text(f"{msg}", color=color))
-        page.update()
-
-    # --- UI WRAPPER ---
+    # SAFEGUARD WRAPPER
     try:
-        log("App Started...", "green")
-        log(f"Storage Path: {INTERNAL_DIR}", "grey")
+        # Load State
+        user_pf = load_pf()
 
-        # 1. Load Portfolio
-        user_pf = load_portfolio_safe()
-        log("Portfolio Loaded.", "green")
+        # --- UI ELEMENTS ---
+        txt_equity = ft.Text(f"₹{user_pf['equity']:,.0f}", size=32, weight="bold", color="white")
+        txt_cash = ft.Text(f"Cash: ₹{user_pf['cash']:,.0f}", color="green", size=16)
+        txt_status = ft.Text("Ready", color="grey")
 
-        # 2. Define UI Elements (Simple strings only)
-        txt_equity = ft.Text(f"Net Worth: {user_pf['equity']}", size=24, weight="bold")
-        txt_cash = ft.Text(f"Cash: {user_pf['cash']}", color="green")
-
-        # 3. Define Actions
+        # --- ACTIONS ---
         def run_sync(e):
-            log("Sync Started...", "yellow")
             try:
-                lazy_load() # Import heavy stuff now
-                log("Libraries Imported.", "blue")
-                
-                # Fetch Data
-                conn = sqlite3.connect(DB_PATH)
-                conn.execute('CREATE TABLE IF NOT EXISTS daily_prices (ticker TEXT PRIMARY KEY, close REAL, roc REAL)')
-                
-                tickers = ["RELIANCE.NS", "TCS.NS", "SBIN.NS", "TATAMOTORS.NS"]
-                for t in tickers:
-                    try:
-                        log(f"Fetching {t}...", "grey")
-                        df = yf.download(t, period="1mo", progress=False)
-                        if not df.empty:
-                            close = float(df['Close'].iloc[-1])
-                            roc = float(ta.roc(df['Close'], length=10).iloc[-1])
-                            conn.execute('INSERT OR REPLACE INTO daily_prices VALUES (?,?,?)', (t, close, roc))
-                    except Exception as ex:
-                        log(f"Skip {t}: {ex}", "red")
-                
-                conn.commit()
-                conn.close()
-                log("Sync Complete!", "green")
-                
+                fetch_data(txt_status, page)
             except Exception as err:
-                log(f"SYNC ERROR: {err}", "red")
-                # Print full error for debugging
-                log(traceback.format_exc(), "red")
+                txt_status.value = f"Sync Error: {str(err)}"
+                page.update()
 
-        def run_scan(e):
-            log("Scanning...", "yellow")
-            try:
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.execute("SELECT ticker, close, roc FROM daily_prices")
-                found = False
-                for row in cursor:
-                    if row[2] > 0: # Positive Momentum
-                        found = True
-                        log(f"BUY: {row[0]} (ROC: {row[2]:.1f})", "green")
-                if not found:
-                    log("No signals found.", "grey")
-                conn.close()
-            except:
-                log("Scan failed (Try Sync first)", "red")
+        def run_buy(ticker, price):
+            qty = int((user_pf['cash'] * 0.1) / price)
+            if qty > 0:
+                user_pf['cash'] -= (qty * price)
+                if ticker in user_pf['holdings']:
+                    user_pf['holdings'][ticker]['qty'] += qty
+                else:
+                    user_pf['holdings'][ticker] = {"qty": qty, "entry_price": price}
+                
+                # Update Net Worth (Simple approximation)
+                user_pf['equity'] = user_pf['cash'] # Start with cash
+                # Add value of holdings (using entry price since we don't have live feed for all)
+                for h_t, h_pos in user_pf['holdings'].items():
+                    user_pf['equity'] += h_pos['qty'] * h_pos['entry_price']
 
-        # 4. Build Layout
-        # We use a simple Column instead of Tabs to ensure it renders 100%
-        page.add(
-            ft.Column([
-                ft.Text("TITAN PRO (SAFE MODE)", size=20, weight="bold"),
-                ft.Divider(),
-                txt_equity,
-                txt_cash,
-                ft.Divider(),
-                ft.Row([
-                    ft.ElevatedButton("SYNC DATA", on_click=run_sync),
-                    ft.ElevatedButton("SCAN", on_click=run_scan),
-                ]),
-                ft.Divider(),
-                ft.Text("SYSTEM LOG:", size=16),
-                log_view
-            ])
-        )
+                save_pf(user_pf)
+                
+                # Refresh UI
+                txt_equity.value = f"₹{user_pf['equity']:,.0f}"
+                txt_cash.value = f"Cash: ₹{user_pf['cash']:,.0f}"
+                txt_status.value = f"Bought {qty} shares of {ticker}"
+                page.update()
+
+        # --- TABS ---
         
-        log("UI Rendered Successfully.", "green")
+        # 1. HOME
+        tab_home = ft.Column([
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("NET WORTH", size=12, color="grey"),
+                    txt_equity,
+                    ft.Divider(),
+                    txt_cash
+                ]),
+                padding=20, bgcolor="#1f1f1f", border_radius=15
+            ),
+            ft.Divider(height=20, color="transparent"),
+            ft.ElevatedButton("Sync Market Data", icon="refresh", on_click=run_sync, height=50, width=400),
+            ft.Divider(height=10, color="transparent"),
+            txt_status
+        ])
+
+        # 2. SCANNER
+        lv_scan = ft.ListView(expand=True, spacing=10)
+        
+        def refresh_scan(e):
+            lv_scan.controls.clear()
+            results = get_scan()
+            if not results:
+                lv_scan.controls.append(ft.Text("No opportunities found or Data empty.", text_align="center"))
+            else:
+                for r in results:
+                    lv_scan.controls.append(
+                        ft.Container(
+                            content=ft.Row([
+                                ft.Column([
+                                    ft.Text(r['ticker'], weight="bold", size=16),
+                                    ft.Text(f"₹{r['price']:.0f}", color="grey")
+                                ]),
+                                ft.Row([
+                                    ft.Text(f"+{r['roc']:.1f}%", color="green", weight="bold"),
+                                    ft.IconButton(icon="add_shopping_cart", icon_color="green", 
+                                                  on_click=lambda e, t=r['ticker'], p=r['price']: run_buy(t, p))
+                                ])
+                            ], alignment="spaceBetween"),
+                            padding=15, bgcolor="#1f1f1f", border_radius=10
+                        )
+                    )
+            page.update()
+
+        tab_scan = ft.Column([
+            ft.ElevatedButton("Run Scanner", icon="radar", on_click=refresh_scan),
+            lv_scan
+        ])
+
+        # 3. PORTFOLIO
+        lv_port = ft.ListView(expand=True, spacing=10)
+        
+        def refresh_port(e):
+            lv_port.controls.clear()
+            if not user_pf['holdings']:
+                lv_port.controls.append(ft.Text("Portfolio is empty."))
+            else:
+                for t, pos in user_pf['holdings'].items():
+                    lv_port.controls.append(
+                        ft.Container(
+                            content=ft.Row([
+                                ft.Column([
+                                    ft.Text(t, weight="bold", size=16),
+                                    ft.Text(f"Avg: ₹{pos['entry_price']:.0f}", color="grey")
+                                ]),
+                                ft.Text(f"{pos['qty']} units", size=18, weight="bold")
+                            ], alignment="spaceBetween"),
+                            padding=15, bgcolor="#1f1f1f", border_radius=10
+                        )
+                    )
+            page.update()
+
+        tab_port = ft.Column([
+            ft.ElevatedButton("Refresh Holdings", icon="list", on_click=refresh_port),
+            lv_port
+        ])
+
+        # --- NAVIGATION ---
+        # Using String Names for icons to prevent version crashes
+        page.add(
+            ft.Tabs(
+                selected_index=0,
+                animation_duration=300,
+                tabs=[
+                    ft.Tab(text="Home", icon="home", content=tab_home),
+                    ft.Tab(text="Scan", icon="search", content=tab_scan),
+                    ft.Tab(text="Holdings", icon="pie_chart", content=tab_port),
+                ],
+                expand=True
+            )
+        )
 
     except Exception as e:
-        # THE SAFETY NET
-        page.add(ft.Text(f"CRITICAL CRASH: {e}", color="red", size=30))
-        page.add(ft.Text(traceback.format_exc(), color="red"))
+        page.add(ft.Text(f"CRITICAL ERROR: {e}\n{traceback.format_exc()}", color="red"))
 
 ft.app(target=main)
