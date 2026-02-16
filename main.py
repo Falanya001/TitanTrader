@@ -13,7 +13,7 @@ except:
 DB_PATH = os.path.join(INTERNAL_DIR, 'market_data.db')
 USER_PF = os.path.join(INTERNAL_DIR, 'user_portfolio.json')
 
-# --- 2. GLOBAL STATE (LAZY LOAD) ---
+# --- 2. LAZY LOAD GLOBALS ---
 pd = None
 ta = None
 yf = None
@@ -24,6 +24,7 @@ def lazy_load():
         import pandas as pd
         import pandas_ta as ta
         import yfinance as yf
+        # Disable cache to avoid permission errors
         yf.set_tz_cache_location(os.path.join(INTERNAL_DIR, "yf_cache"))
 
 # --- 3. DATA ENGINE ---
@@ -51,13 +52,22 @@ def fetch_data(status_txt, page):
             page.update()
             
             df = yf.download(t, period="3mo", progress=False)
-            if not df.empty:
-                # Safe float conversion for SQLite
-                close = float(df['Close'].iloc[-1])
-                roc = float(ta.roc(df['Close'], length=20).iloc[-1])
-                rsi = float(ta.rsi(df['Close'], length=14).iloc[-1])
-                conn.execute('INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?)', (t, close, roc, rsi))
-        except: continue
+            if df.empty: continue
+
+            # --- CRITICAL FIX: FLATTEN COLUMNS ---
+            # This prevents the "MultiIndex" crash on mobile
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            
+            # Safe Access
+            close = float(df['Close'].iloc[-1])
+            roc = float(ta.roc(df['Close'], length=20).iloc[-1])
+            rsi = float(ta.rsi(df['Close'], length=14).iloc[-1])
+            
+            conn.execute('INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?)', (t, close, roc, rsi))
+        except Exception as e:
+            print(f"Skipping {t}: {e}")
+            continue
     
     conn.commit()
     conn.close()
@@ -71,7 +81,6 @@ def get_scan():
     try:
         cursor = conn.execute("SELECT ticker, close, roc, rsi FROM daily_prices")
         for row in cursor:
-            # STRATEGY: Momentum > 0 AND Not Overbought (RSI < 70)
             if row[2] > 0 and row[3] < 70:
                 results.append({"ticker": row[0], "price": row[1], "roc": row[2]})
     except: pass
@@ -80,21 +89,20 @@ def get_scan():
 
 # --- 4. UI BUILDER ---
 def main(page: ft.Page):
-    page.title = "Titan Pro"
+    page.title = "Titan Pro V5"
     page.theme_mode = "dark"
     page.padding = 10
+    page.scroll = "auto"
     
-    # SAFEGUARD WRAPPER
     try:
-        # Load State
         user_pf = load_pf()
 
-        # --- UI ELEMENTS ---
+        # UI VARS
         txt_equity = ft.Text(f"₹{user_pf['equity']:,.0f}", size=32, weight="bold", color="white")
         txt_cash = ft.Text(f"Cash: ₹{user_pf['cash']:,.0f}", color="green", size=16)
         txt_status = ft.Text("Ready", color="grey")
 
-        # --- ACTIONS ---
+        # ACTIONS
         def run_sync(e):
             try:
                 fetch_data(txt_status, page)
@@ -111,21 +119,18 @@ def main(page: ft.Page):
                 else:
                     user_pf['holdings'][ticker] = {"qty": qty, "entry_price": price}
                 
-                # Update Net Worth (Simple approximation)
-                user_pf['equity'] = user_pf['cash'] # Start with cash
-                # Add value of holdings (using entry price since we don't have live feed for all)
+                # Update Net Worth
+                user_pf['equity'] = user_pf['cash'] 
                 for h_t, h_pos in user_pf['holdings'].items():
                     user_pf['equity'] += h_pos['qty'] * h_pos['entry_price']
 
                 save_pf(user_pf)
-                
-                # Refresh UI
                 txt_equity.value = f"₹{user_pf['equity']:,.0f}"
                 txt_cash.value = f"Cash: ₹{user_pf['cash']:,.0f}"
-                txt_status.value = f"Bought {qty} shares of {ticker}"
+                txt_status.value = f"Bought {qty} {ticker}"
                 page.update()
 
-        # --- TABS ---
+        # --- TABS CONTENT ---
         
         # 1. HOME
         tab_home = ft.Column([
@@ -139,19 +144,18 @@ def main(page: ft.Page):
                 padding=20, bgcolor="#1f1f1f", border_radius=15
             ),
             ft.Divider(height=20, color="transparent"),
-            ft.ElevatedButton("Sync Market Data", icon="refresh", on_click=run_sync, height=50, width=400),
+            ft.ElevatedButton("Sync Data", on_click=run_sync, height=50, width=400),
             ft.Divider(height=10, color="transparent"),
             txt_status
         ])
 
         # 2. SCANNER
         lv_scan = ft.ListView(expand=True, spacing=10)
-        
         def refresh_scan(e):
             lv_scan.controls.clear()
             results = get_scan()
             if not results:
-                lv_scan.controls.append(ft.Text("No opportunities found or Data empty.", text_align="center"))
+                lv_scan.controls.append(ft.Text("No Data. Sync First."))
             else:
                 for r in results:
                     lv_scan.controls.append(
@@ -162,7 +166,7 @@ def main(page: ft.Page):
                                     ft.Text(f"₹{r['price']:.0f}", color="grey")
                                 ]),
                                 ft.Row([
-                                    ft.Text(f"+{r['roc']:.1f}%", color="green", weight="bold"),
+                                    ft.Text(f"+{r['roc']:.1f}%", color="green"),
                                     ft.IconButton(icon="add_shopping_cart", icon_color="green", 
                                                   on_click=lambda e, t=r['ticker'], p=r['price']: run_buy(t, p))
                                 ])
@@ -173,26 +177,22 @@ def main(page: ft.Page):
             page.update()
 
         tab_scan = ft.Column([
-            ft.ElevatedButton("Run Scanner", icon="radar", on_click=refresh_scan),
+            ft.ElevatedButton("Run Scanner", on_click=refresh_scan),
             lv_scan
         ])
 
         # 3. PORTFOLIO
         lv_port = ft.ListView(expand=True, spacing=10)
-        
         def refresh_port(e):
             lv_port.controls.clear()
             if not user_pf['holdings']:
-                lv_port.controls.append(ft.Text("Portfolio is empty."))
+                lv_port.controls.append(ft.Text("Portfolio Empty"))
             else:
                 for t, pos in user_pf['holdings'].items():
                     lv_port.controls.append(
                         ft.Container(
                             content=ft.Row([
-                                ft.Column([
-                                    ft.Text(t, weight="bold", size=16),
-                                    ft.Text(f"Avg: ₹{pos['entry_price']:.0f}", color="grey")
-                                ]),
+                                ft.Column([ft.Text(t, weight="bold"), ft.Text(f"Avg: {pos['entry_price']:.0f}")]),
                                 ft.Text(f"{pos['qty']} units", size=18, weight="bold")
                             ], alignment="spaceBetween"),
                             padding=15, bgcolor="#1f1f1f", border_radius=10
@@ -201,20 +201,29 @@ def main(page: ft.Page):
             page.update()
 
         tab_port = ft.Column([
-            ft.ElevatedButton("Refresh Holdings", icon="list", on_click=refresh_port),
+            ft.ElevatedButton("Refresh", on_click=refresh_port),
             lv_port
         ])
 
-        # --- NAVIGATION ---
-        # Using String Names for icons to prevent version crashes
+        # --- NAVIGATION (FIXED) ---
+        # We replace 'text' with 'tab_content' which takes a Control
+        # This bypasses the keyword error completely.
         page.add(
             ft.Tabs(
                 selected_index=0,
-                animation_duration=300,
                 tabs=[
-                    ft.Tab(text="Home", icon="home", content=tab_home),
-                    ft.Tab(text="Scan", icon="search", content=tab_scan),
-                    ft.Tab(text="Holdings", icon="pie_chart", content=tab_port),
+                    ft.Tab(
+                        tab_content=ft.Row([ft.Icon("home"), ft.Text("Home")]), 
+                        content=tab_home
+                    ),
+                    ft.Tab(
+                        tab_content=ft.Row([ft.Icon("search"), ft.Text("Scan")]), 
+                        content=tab_scan
+                    ),
+                    ft.Tab(
+                        tab_content=ft.Row([ft.Icon("pie_chart"), ft.Text("Port")]), 
+                        content=tab_port
+                    ),
                 ],
                 expand=True
             )
