@@ -24,7 +24,6 @@ def lazy_load():
         import pandas as pd
         import pandas_ta as ta
         import yfinance as yf
-        # Disable cache to avoid permission errors
         yf.set_tz_cache_location(os.path.join(INTERNAL_DIR, "yf_cache"))
 
 # --- 3. DATA ENGINE ---
@@ -54,24 +53,22 @@ def fetch_data(status_txt, page):
             df = yf.download(t, period="3mo", progress=False)
             if df.empty: continue
 
-            # --- CRITICAL FIX: FLATTEN COLUMNS ---
-            # This prevents the "MultiIndex" crash on mobile
+            # --- FLATTEN COLUMNS FIX ---
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
-            # Safe Access
             close = float(df['Close'].iloc[-1])
             roc = float(ta.roc(df['Close'], length=20).iloc[-1])
             rsi = float(ta.rsi(df['Close'], length=14).iloc[-1])
             
             conn.execute('INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?)', (t, close, roc, rsi))
         except Exception as e:
-            print(f"Skipping {t}: {e}")
+            print(f"Skip {t}: {e}")
             continue
     
     conn.commit()
     conn.close()
-    status_txt.value = "Market Data Synced Successfully."
+    status_txt.value = "Market Data Synced."
     page.update()
 
 def get_scan():
@@ -89,20 +86,22 @@ def get_scan():
 
 # --- 4. UI BUILDER ---
 def main(page: ft.Page):
-    page.title = "Titan Pro V5"
+    page.title = "Titan Pro V6"
     page.theme_mode = "dark"
     page.padding = 10
-    page.scroll = "auto"
     
     try:
         user_pf = load_pf()
 
-        # UI VARS
+        # UI VARIABLES
         txt_equity = ft.Text(f"₹{user_pf['equity']:,.0f}", size=32, weight="bold", color="white")
         txt_cash = ft.Text(f"Cash: ₹{user_pf['cash']:,.0f}", color="green", size=16)
         txt_status = ft.Text("Ready", color="grey")
+        
+        # CONTAINER FOR CHANGING VIEWS
+        body_container = ft.Column(expand=True, scroll="auto")
 
-        # ACTIONS
+        # --- ACTIONS ---
         def run_sync(e):
             try:
                 fetch_data(txt_status, page)
@@ -119,7 +118,6 @@ def main(page: ft.Page):
                 else:
                     user_pf['holdings'][ticker] = {"qty": qty, "entry_price": price}
                 
-                # Update Net Worth
                 user_pf['equity'] = user_pf['cash'] 
                 for h_t, h_pos in user_pf['holdings'].items():
                     user_pf['equity'] += h_pos['qty'] * h_pos['entry_price']
@@ -130,35 +128,33 @@ def main(page: ft.Page):
                 txt_status.value = f"Bought {qty} {ticker}"
                 page.update()
 
-        # --- TABS CONTENT ---
-        
-        # 1. HOME
-        tab_home = ft.Column([
-            ft.Container(
-                content=ft.Column([
-                    ft.Text("NET WORTH", size=12, color="grey"),
-                    txt_equity,
-                    ft.Divider(),
-                    txt_cash
-                ]),
-                padding=20, bgcolor="#1f1f1f", border_radius=15
-            ),
-            ft.Divider(height=20, color="transparent"),
-            ft.ElevatedButton("Sync Data", on_click=run_sync, height=50, width=400),
-            ft.Divider(height=10, color="transparent"),
-            txt_status
-        ])
+        # --- VIEW GENERATORS ---
+        def show_home(e=None):
+            body_container.controls = [
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("NET WORTH", size=12, color="grey"),
+                        txt_equity,
+                        ft.Divider(),
+                        txt_cash
+                    ]),
+                    padding=20, bgcolor="#1f1f1f", border_radius=15
+                ),
+                ft.Divider(height=20, color="transparent"),
+                ft.ElevatedButton("Sync Data", icon="refresh", on_click=run_sync, height=50, width=400),
+                ft.Divider(height=10, color="transparent"),
+                txt_status
+            ]
+            page.update()
 
-        # 2. SCANNER
-        lv_scan = ft.ListView(expand=True, spacing=10)
-        def refresh_scan(e):
-            lv_scan.controls.clear()
+        def show_scan(e=None):
             results = get_scan()
+            items = []
             if not results:
-                lv_scan.controls.append(ft.Text("No Data. Sync First."))
+                items.append(ft.Text("No Data. Sync First."))
             else:
                 for r in results:
-                    lv_scan.controls.append(
+                    items.append(
                         ft.Container(
                             content=ft.Row([
                                 ft.Column([
@@ -174,22 +170,20 @@ def main(page: ft.Page):
                             padding=15, bgcolor="#1f1f1f", border_radius=10
                         )
                     )
+            
+            body_container.controls = [
+                ft.ElevatedButton("Run Scanner", icon="radar", on_click=show_scan),
+                ft.Column(items, spacing=10)
+            ]
             page.update()
 
-        tab_scan = ft.Column([
-            ft.ElevatedButton("Run Scanner", on_click=refresh_scan),
-            lv_scan
-        ])
-
-        # 3. PORTFOLIO
-        lv_port = ft.ListView(expand=True, spacing=10)
-        def refresh_port(e):
-            lv_port.controls.clear()
+        def show_port(e=None):
+            items = []
             if not user_pf['holdings']:
-                lv_port.controls.append(ft.Text("Portfolio Empty"))
+                items.append(ft.Text("Portfolio Empty"))
             else:
                 for t, pos in user_pf['holdings'].items():
-                    lv_port.controls.append(
+                    items.append(
                         ft.Container(
                             content=ft.Row([
                                 ft.Column([ft.Text(t, weight="bold"), ft.Text(f"Avg: {pos['entry_price']:.0f}")]),
@@ -198,36 +192,35 @@ def main(page: ft.Page):
                             padding=15, bgcolor="#1f1f1f", border_radius=10
                         )
                     )
+            body_container.controls = [
+                ft.ElevatedButton("Refresh", icon="list", on_click=show_port),
+                ft.Column(items, spacing=10)
+            ]
             page.update()
 
-        tab_port = ft.Column([
-            ft.ElevatedButton("Refresh", on_click=refresh_port),
-            lv_port
-        ])
-
-        # --- NAVIGATION (FIXED) ---
-        # We replace 'text' with 'tab_content' which takes a Control
-        # This bypasses the keyword error completely.
-        page.add(
-            ft.Tabs(
-                selected_index=0,
-                tabs=[
-                    ft.Tab(
-                        tab_content=ft.Row([ft.Icon("home"), ft.Text("Home")]), 
-                        content=tab_home
-                    ),
-                    ft.Tab(
-                        tab_content=ft.Row([ft.Icon("search"), ft.Text("Scan")]), 
-                        content=tab_scan
-                    ),
-                    ft.Tab(
-                        tab_content=ft.Row([ft.Icon("pie_chart"), ft.Text("Port")]), 
-                        content=tab_port
-                    ),
-                ],
-                expand=True
-            )
+        # --- MAIN LAYOUT (CUSTOM NAVBAR) ---
+        # No ft.Tabs widget used here. Just a Row of Buttons.
+        navbar = ft.Container(
+            content=ft.Row([
+                ft.IconButton(icon="home", icon_size=30, on_click=show_home),
+                ft.IconButton(icon="search", icon_size=30, on_click=show_scan),
+                ft.IconButton(icon="pie_chart", icon_size=30, on_click=show_port),
+            ], alignment="spaceAround"),
+            bgcolor="#1f1f1f",
+            padding=10,
+            border_radius=ft.border_radius.only(top_left=15, top_right=15)
         )
+
+        page.add(
+            ft.Column([
+                ft.Text("TITAN PRO", size=20, weight="bold", text_align="center"),
+                body_container, # The changing content
+                navbar          # The static bottom bar
+            ], expand=True)
+        )
+
+        # Init
+        show_home()
 
     except Exception as e:
         page.add(ft.Text(f"CRITICAL ERROR: {e}\n{traceback.format_exc()}", color="red"))
