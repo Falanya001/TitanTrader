@@ -41,4 +41,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: TitanPro-APK
-        path: build/app/outputs/flutter-apk/app-release.apk
+        path: build/apk/
