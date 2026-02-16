@@ -4,20 +4,16 @@ import json
 import sqlite3
 from datetime import datetime
 
-# --- 1. ANDROID FILE SYSTEM SETUP (The Fix) ---
-# We must find a folder where Android allows us to write files.
+# --- 1. ANDROID FILE SYSTEM SETUP ---
 try:
-    # This gets the internal app storage directory
     INTERNAL_DIR = os.environ.get("FLET_APP_STORAGE_DATA", os.getcwd())
 except:
     INTERNAL_DIR = ""
 
-# Define paths relative to the writable directory
 DB_PATH = os.path.join(INTERNAL_DIR, 'market_data.db')
 USER_PF = os.path.join(INTERNAL_DIR, 'user_portfolio.json')
 
-# --- 2. SAFE IMPORTS (To prevent black screen crashes) ---
-# We import these later to ensure the UI loads first
+# --- 2. SAFE IMPORTS ---
 pd = None
 ta = None
 yf = None
@@ -28,13 +24,12 @@ def lazy_load_libraries():
         import pandas as pd
         import pandas_ta as ta
         import yfinance as yf
-        # Disable yfinance cache to prevent permission errors
+        # Disable cache to prevent permission errors
         yf.set_tz_cache_location(os.path.join(INTERNAL_DIR, "yf_cache"))
 
 # --- HELPER FUNCTIONS ---
 def load_json(filename):
     if not os.path.exists(filename):
-        # Default starting state
         return {"cash": 1000000, "equity": 1000000, "holdings": {}, "history": []}
     with open(filename, 'r') as f: return json.load(f)
 
@@ -53,10 +48,8 @@ def fetch_fresh_data():
         try:
             df = yf.download(ticker, period="3mo", progress=False)
             if not df.empty:
-                # Calculate Indicators immediately to save storage
                 df['ROC'] = ta.roc(df['Close'], length=20)
                 df['RSI'] = ta.rsi(df['Close'], length=14)
-                
                 curr = df.iloc[-1]
                 conn.execute('INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?,?)', 
                              (str(curr.name), ticker, float(curr['Close']), float(curr['ROC']), float(curr['RSI'])))
@@ -72,7 +65,6 @@ def get_scan_results():
         cursor = conn.execute("SELECT ticker, close, ROC, RSI FROM daily_prices")
         for row in cursor:
             t, price, roc, rsi = row
-            # Simple Logic: Momentum > 0 and Not Overbought
             if roc > 0 and rsi < 70:
                 results.append({"ticker": t, "price": price, "roc": roc})
     except: pass
@@ -85,21 +77,18 @@ def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.DARK
     page.scroll = "adaptive"
     
-    # Error Catcher
     def show_error(msg):
         page.snack_bar = ft.SnackBar(ft.Text(f"Error: {msg}"), bgcolor="red")
         page.snack_bar.open = True
         page.update()
 
     try:
-        # Load User Data
         user_pf = load_json(USER_PF)
         
         # --- VIEWS ---
         txt_equity = ft.Text(f"₹{user_pf['equity']:,.0f}", size=30, weight="bold")
         txt_cash = ft.Text(f"Cash: ₹{user_pf['cash']:,.0f}", color="green")
         
-        # Action: Sync Data
         def on_sync(e):
             btn_sync.disabled = True
             btn_sync.text = "Syncing..."
@@ -114,9 +103,9 @@ def main(page: ft.Page):
             page.snack_bar.open = True
             page.update()
 
-        btn_sync = ft.ElevatedButton("Sync Market Data", icon=ft.icons.REFRESH, on_click=on_sync)
+        # FIXED: Use string "refresh" instead of ft.icons.REFRESH
+        btn_sync = ft.ElevatedButton("Sync Market Data", icon="refresh", on_click=on_sync)
 
-        # Action: Buy
         def buy_stock(ticker, price):
             qty = int((user_pf['cash'] * 0.1) / price)
             if qty > 0:
@@ -126,7 +115,7 @@ def main(page: ft.Page):
                 else:
                     user_pf['holdings'][ticker] = {"qty": qty, "entry_price": price}
                 save_json(user_pf, USER_PF)
-                txt_equity.value = f"₹{user_pf['equity']:,.0f}" # Simplified equity update
+                txt_equity.value = f"₹{user_pf['equity']:,.0f}"
                 txt_cash.value = f"Cash: ₹{user_pf['cash']:,.0f}"
                 page.update()
                 page.snack_bar = ft.SnackBar(ft.Text(f"Bought {qty} {ticker}"))
@@ -178,20 +167,19 @@ def main(page: ft.Page):
             
         port_view = ft.Column([ft.ElevatedButton("Refresh", on_click=load_port), lv_port])
 
-        # Navigation
+        # Navigation - FIXED ICONS HERE TOO
         t = ft.Tabs(
             selected_index=0,
             tabs=[
-                ft.Tab(text="Home", content=dash_view),
-                ft.Tab(text="Scan", content=scan_view),
-                ft.Tab(text="Port", content=port_view),
+                ft.Tab(text="Home", icon="dashboard", content=dash_view),
+                ft.Tab(text="Scan", icon="radar", content=scan_view),
+                ft.Tab(text="Port", icon="pie_chart", content=port_view),
             ],
             expand=1
         )
         page.add(t)
 
     except Exception as e:
-        # THE SAFETY NET: If app crashes, show why on screen
         page.add(ft.Text(f"CRITICAL ERROR: {e}", color="red", size=20))
 
 ft.app(target=main)
