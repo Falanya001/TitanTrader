@@ -1,4 +1,5 @@
 flet
 pandas
-https://github.com/twopirllc/pandas-ta/archive/development.zip
+git+https://github.com/aarigs/pandas-ta.git@development
 yfinance
+
