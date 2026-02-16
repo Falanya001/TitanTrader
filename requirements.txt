@@ -1,5 +1,6 @@
 flet
 pandas
-pandas_ta
+git+https://github.com/twopirllc/pandas-ta.git@development
 yfinance
+
 sqlite3
