@@ -13,7 +13,7 @@ except:
 DB_PATH = os.path.join(INTERNAL_DIR, 'market_data.db')
 USER_PF = os.path.join(INTERNAL_DIR, 'user_portfolio.json')
 
-# --- 2. LAZY LOAD GLOBALS ---
+# --- 2. LAZY LOAD ---
 pd = None
 ta = None
 yf = None
@@ -26,7 +26,7 @@ def lazy_load():
         import yfinance as yf
         yf.set_tz_cache_location(os.path.join(INTERNAL_DIR, "yf_cache"))
 
-# --- 3. DATA ENGINE ---
+# --- 3. DATA LOGIC ---
 def load_pf():
     if not os.path.exists(USER_PF):
         return {"cash": 1000000.0, "equity": 1000000.0, "holdings": {}}
@@ -35,9 +35,8 @@ def load_pf():
 def save_pf(data):
     with open(USER_PF, 'w') as f: json.dump(data, f, indent=4)
 
-TICKERS = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
-           "ITC.NS", "SBIN.NS", "TATAMOTORS.NS", "TRENT.NS", "ZOMATO.NS", 
-           "BEL.NS", "HAL.NS", "VBL.NS", "TITAN.NS"]
+TICKERS = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ITC.NS", 
+           "SBIN.NS", "TATAMOTORS.NS", "TRENT.NS", "ZOMATO.NS", "TITAN.NS"]
 
 def fetch_data(status_txt, page):
     lazy_load()
@@ -53,7 +52,7 @@ def fetch_data(status_txt, page):
             df = yf.download(t, period="3mo", progress=False)
             if df.empty: continue
 
-            # --- FLATTEN COLUMNS FIX ---
+            # FORCE FLATTEN COLUMNS (Prevents crash)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
@@ -62,13 +61,11 @@ def fetch_data(status_txt, page):
             rsi = float(ta.rsi(df['Close'], length=14).iloc[-1])
             
             conn.execute('INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?)', (t, close, roc, rsi))
-        except Exception as e:
-            print(f"Skip {t}: {e}")
-            continue
+        except: continue
     
     conn.commit()
     conn.close()
-    status_txt.value = "Market Data Synced."
+    status_txt.value = "Sync Complete."
     page.update()
 
 def get_scan():
@@ -84,29 +81,29 @@ def get_scan():
     conn.close()
     return sorted(results, key=lambda x: x['roc'], reverse=True)
 
-# --- 4. UI BUILDER ---
+# --- 4. THE UI (PRIMITIVES ONLY) ---
 def main(page: ft.Page):
-    page.title = "Titan Pro V6"
+    page.title = "Titan Tank"
     page.theme_mode = "dark"
     page.padding = 10
     
     try:
         user_pf = load_pf()
 
-        # UI VARIABLES
-        txt_equity = ft.Text(f"₹{user_pf['equity']:,.0f}", size=32, weight="bold", color="white")
-        txt_cash = ft.Text(f"Cash: ₹{user_pf['cash']:,.0f}", color="green", size=16)
-        txt_status = ft.Text("Ready", color="grey")
+        # VARS
+        txt_equity = ft.Text(f"NET: {user_pf['equity']:,.0f}", size=20, weight="bold")
+        txt_cash = ft.Text(f"CASH: {user_pf['cash']:,.0f}", color="green")
+        txt_status = ft.Text("Ready")
         
-        # CONTAINER FOR CHANGING VIEWS
-        body_container = ft.Column(expand=True, scroll="auto")
+        # MAIN CONTAINER
+        content_area = ft.Column(expand=True, scroll="auto")
 
-        # --- ACTIONS ---
+        # ACTIONS
         def run_sync(e):
             try:
                 fetch_data(txt_status, page)
             except Exception as err:
-                txt_status.value = f"Sync Error: {str(err)}"
+                txt_status.value = f"Err: {str(err)}"
                 page.update()
 
         def run_buy(ticker, price):
@@ -118,111 +115,88 @@ def main(page: ft.Page):
                 else:
                     user_pf['holdings'][ticker] = {"qty": qty, "entry_price": price}
                 
+                # Simple Equity Update
                 user_pf['equity'] = user_pf['cash'] 
                 for h_t, h_pos in user_pf['holdings'].items():
                     user_pf['equity'] += h_pos['qty'] * h_pos['entry_price']
 
                 save_pf(user_pf)
-                txt_equity.value = f"₹{user_pf['equity']:,.0f}"
-                txt_cash.value = f"Cash: ₹{user_pf['cash']:,.0f}"
+                txt_equity.value = f"NET: {user_pf['equity']:,.0f}"
+                txt_cash.value = f"CASH: {user_pf['cash']:,.0f}"
                 txt_status.value = f"Bought {qty} {ticker}"
                 page.update()
 
-        # --- VIEW GENERATORS ---
-        def show_home(e=None):
-            body_container.controls = [
+        # VIEW CHANGERS
+        def go_home(e=None):
+            content_area.controls = [
                 ft.Container(
-                    content=ft.Column([
-                        ft.Text("NET WORTH", size=12, color="grey"),
-                        txt_equity,
-                        ft.Divider(),
-                        txt_cash
-                    ]),
-                    padding=20, bgcolor="#1f1f1f", border_radius=15
+                    content=ft.Column([txt_equity, txt_cash]),
+                    padding=20, bgcolor="#222222"
                 ),
-                ft.Divider(height=20, color="transparent"),
-                ft.ElevatedButton("Sync Data", icon="refresh", on_click=run_sync, height=50, width=400),
-                ft.Divider(height=10, color="transparent"),
+                ft.Divider(),
+                ft.ElevatedButton("SYNC MARKET DATA", on_click=run_sync),
+                ft.Divider(),
                 txt_status
             ]
             page.update()
 
-        def show_scan(e=None):
+        def go_scan(e=None):
             results = get_scan()
-            items = []
+            rows = []
             if not results:
-                items.append(ft.Text("No Data. Sync First."))
+                rows.append(ft.Text("No Data. Sync First."))
             else:
                 for r in results:
-                    items.append(
+                    rows.append(
                         ft.Container(
                             content=ft.Row([
-                                ft.Column([
-                                    ft.Text(r['ticker'], weight="bold", size=16),
-                                    ft.Text(f"₹{r['price']:.0f}", color="grey")
-                                ]),
-                                ft.Row([
-                                    ft.Text(f"+{r['roc']:.1f}%", color="green"),
-                                    ft.IconButton(icon="add_shopping_cart", icon_color="green", 
-                                                  on_click=lambda e, t=r['ticker'], p=r['price']: run_buy(t, p))
-                                ])
+                                ft.Column([ft.Text(r['ticker']), ft.Text(f"{r['price']:.0f}")]),
+                                ft.ElevatedButton("BUY", on_click=lambda e, t=r['ticker'], p=r['price']: run_buy(t, p))
                             ], alignment="spaceBetween"),
-                            padding=15, bgcolor="#1f1f1f", border_radius=10
+                            padding=10, bgcolor="#222222"
                         )
                     )
-            
-            body_container.controls = [
-                ft.ElevatedButton("Run Scanner", icon="radar", on_click=show_scan),
-                ft.Column(items, spacing=10)
-            ]
+            content_area.controls = [ft.ElevatedButton("REFRESH", on_click=go_scan)] + rows
             page.update()
 
-        def show_port(e=None):
-            items = []
+        def go_port(e=None):
+            rows = []
             if not user_pf['holdings']:
-                items.append(ft.Text("Portfolio Empty"))
+                rows.append(ft.Text("Empty"))
             else:
                 for t, pos in user_pf['holdings'].items():
-                    items.append(
+                    rows.append(
                         ft.Container(
                             content=ft.Row([
-                                ft.Column([ft.Text(t, weight="bold"), ft.Text(f"Avg: {pos['entry_price']:.0f}")]),
-                                ft.Text(f"{pos['qty']} units", size=18, weight="bold")
+                                ft.Column([ft.Text(t), ft.Text(f"Avg: {pos['entry_price']:.0f}")]),
+                                ft.Text(f"{pos['qty']}")
                             ], alignment="spaceBetween"),
-                            padding=15, bgcolor="#1f1f1f", border_radius=10
+                            padding=10, bgcolor="#222222"
                         )
                     )
-            body_container.controls = [
-                ft.ElevatedButton("Refresh", icon="list", on_click=show_port),
-                ft.Column(items, spacing=10)
-            ]
+            content_area.controls = [ft.ElevatedButton("REFRESH", on_click=go_port)] + rows
             page.update()
 
-        # --- MAIN LAYOUT (CUSTOM NAVBAR) ---
-        # No ft.Tabs widget used here. Just a Row of Buttons.
-        navbar = ft.Container(
-            content=ft.Row([
-                ft.IconButton(icon="home", icon_size=30, on_click=show_home),
-                ft.IconButton(icon="search", icon_size=30, on_click=show_scan),
-                ft.IconButton(icon="pie_chart", icon_size=30, on_click=show_port),
-            ], alignment="spaceAround"),
-            bgcolor="#1f1f1f",
-            padding=10,
-            border_radius=ft.border_radius.only(top_left=15, top_right=15)
-        )
+        # NAVBAR (TEXT ONLY - NO ICONS)
+        navbar = ft.Row([
+            ft.TextButton("[ HOME ]", on_click=go_home),
+            ft.TextButton("[ SCAN ]", on_click=go_scan),
+            ft.TextButton("[ PORT ]", on_click=go_port),
+        ], alignment="center")
 
+        # ASSEMBLE
         page.add(
             ft.Column([
                 ft.Text("TITAN PRO", size=20, weight="bold", text_align="center"),
-                body_container, # The changing content
-                navbar          # The static bottom bar
+                content_area,
+                ft.Divider(),
+                navbar
             ], expand=True)
         )
-
-        # Init
-        show_home()
+        
+        go_home()
 
     except Exception as e:
-        page.add(ft.Text(f"CRITICAL ERROR: {e}\n{traceback.format_exc()}", color="red"))
+        page.add(ft.Text(f"CRITICAL: {e}\n{traceback.format_exc()}", color="red"))
 
 ft.app(target=main)
