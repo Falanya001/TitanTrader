@@ -29,14 +29,13 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Setup Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        flutter-version: '3.19.0'
+    # REMOVED MANUAL FLUTTER SETUP to avoid version conflicts.
+    # Flet will install exactly what it needs.
 
     - name: Build APK with Flet
+      # The "yes |" part automatically answers "y" to the install prompt
       run: |
-        flet build apk --verbose
+        yes | flet build apk --verbose
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
